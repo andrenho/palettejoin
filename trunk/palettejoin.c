@@ -25,6 +25,7 @@ struct Image {
 static struct Image* image         = NULL;               // images
 static struct Image  final         = { .n_colors = 0 };  // joined palette
 static int           n_input_files = 0;                  // # of total files
+static int           c;                                  // parser lookahead
 
 /* 
  * User options
@@ -243,10 +244,39 @@ void read_palette_png(int n, char* filename)
 }
 
 
+// parsing functions
+inline void read_until_next_eol(FILE* f)
+{
+	do
+	{
+		c = fgetc(f);
+	} while(c != '\n' || c != EOF);
+}
+
 void read_palette_gpl(int n, char* filename)
 {
-	(void) n, (void) filename;
 	// TODO
+
+	int i = 0;
+	char who_cares[2048];
+	image[n].valid = 0;
+
+	FILE* f = fopen(filename, "r");
+	if(!f)
+	{
+		perror(filename);
+		return;
+	}
+	c = fgetc(f);
+	read_until_next_eol(f);
+	read_until_next_eol(f);
+	read_until_next_eol(f);
+	read_until_next_eol(f);
+	while(c != EOF)
+		fscanf(f, "%d %d %d %s", (int*)&image[n].palette[i].red,
+				         (int*)&image[n].palette[i].green,
+				         (int*)&image[n].palette[i].blue,
+					 who_cares);
 }
 
 
@@ -279,11 +309,14 @@ void merge_palettes()
 {
 	int i, j, k; // loop counters
 
+	final.n_colors = 1; // 0 is used for transparency
+	final.palette[0] = (png_color) { 255, 0, 255 };
+
 	for(i=0; i<n_input_files; i++)
 		if(image[i].valid) for(j=0; j<image[i].n_colors; j++)
 		{
 			int found = 0;
-			for(k=0; k<final.n_colors; k++)
+			for(k=1; k<final.n_colors; k++)
 				if(colorcmp(&final.palette[k], 
 						&image[i].palette[j]))
 					found = 1;
@@ -372,15 +405,15 @@ out_error:
 
 static void replace_colors(int n)
 {
-	// TODO - transparent color
-
 	// find correspondant colors
 	int x, y, correspondence[256] = { [0 ... 255] -1 } ;
 	for(y=0; y<image[n].h; y++)
 		for(x=0; x<image[n].w; x++)
 		{
 			png_byte c = image[n].row_pointers[y][x];
-			if(correspondence[c] == -1)
+			if(c == image[n].transparent)
+				correspondence[c] = 0;
+			else if(correspondence[c] == -1)
 			{
 				int i;
 				for(i=0; i<image[n].n_colors; i++)
@@ -439,6 +472,10 @@ static void save_image(int n)
 
 	// write palette
 	png_set_PLTE(png_ptr, info_ptr, final.palette, final.n_colors);
+
+	// set transparent color
+	png_byte trans_alpha[256] = { [0 ... 255] 0 };
+	png_set_tRNS(png_ptr, info_ptr, trans_alpha, 1, NULL);
 	
 	// write data
 	png_write_info(png_ptr, info_ptr);
