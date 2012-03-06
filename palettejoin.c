@@ -8,20 +8,23 @@
 
 #include <png.h>
 
-#define PALETTEJOIN_VERSION "0.0.1"
+#define PALETTEJOIN_VERSION "1.0.0"
 
-struct Palette {
+struct Image {
 	png_color* palette;
 	int        n_colors;
 	int        valid;
+	int        transparent;
+	png_bytep* row_pointers;
+	int        w, h;
 };
 
 /*
  * Global variables
  */
-static struct Palette* palette       = NULL;               // images palettes
-static struct Palette  final         = { .n_colors = 0 };  // joined palette
-static int             n_input_files = 0;                  // # of total files
+static struct Image* image         = NULL;               // images
+static struct Image  final         = { .n_colors = 0 };  // joined palette
+static int           n_input_files = 0;                  // # of total files
 
 /* 
  * User options
@@ -30,7 +33,6 @@ static char** input_files      = NULL;  // names of the files
 static int    output_palette   = 0;
 static int    eliminate_unused = 0;
 static int    backup_old_files = 1;
-static int    verbose          = 0;
 
 /*
  * Allocation functions: fail on error.
@@ -52,7 +54,6 @@ static void help(char* program_name, int exit_status)
 			"in PAL format\n");
 	printf("  -x, --eliminate-unused   eliminates unused colors\n");
 	printf("  -n, --no-backup          don't backup old files\n");
-	printf("  -v, --verbose            display debug information\n");
 	printf("\n");
 	printf("FILEs can be in PNG or GPL (Gimp palette) format.\n");
 	printf("\n");
@@ -94,13 +95,12 @@ static void get_options(int argc, char* argv[])
 			{ "output-palette", 0, 0, 0 },
 			{ "eliminate-unused", 0, 0, 0 },
 			{ "no-backup", 0, 0, 0 },
-			{ "verbose", 0, 0, 0 },
 			{ "help", 0, 0, 0 },
 			{ "version", 0, 0, 0 },
 			{ 0, 0, 0, 0 }
 		};
 
-		if((c = getopt_long(argc, argv, "pxnhv", long_options, 
+		if((c = getopt_long(argc, argv, "pxnh", long_options, 
 				&option_index)) == -1)
 			break;
 
@@ -125,10 +125,6 @@ static void get_options(int argc, char* argv[])
 
 		case 'n':
 			backup_old_files = 0;
-			break;
-
-		case 'v':
-			verbose = 1;
 			break;
 
 		case 'h':
@@ -158,7 +154,7 @@ static void get_options(int argc, char* argv[])
  */
 void read_palette_png(int n, char* filename)
 {
-	palette[n].valid = 0;
+	image[n].valid = 0;
 
 	// open file
 	FILE* f = fopen(filename, "rb");
@@ -194,13 +190,18 @@ void read_palette_png(int n, char* filename)
 	}
 
 	// read PNG file info
+	int bitdepth, color_type;
 	png_init_io(png_ptr, f);
 	png_set_sig_bytes(png_ptr, 8);
 	png_read_info(png_ptr, info_ptr);
-	if(png_get_color_type(png_ptr, info_ptr) != PNG_COLOR_TYPE_PALETTE)
+	image[n].h = png_get_image_height(png_ptr, info_ptr);
+	image[n].w = png_get_image_width(png_ptr, info_ptr);
+	bitdepth = png_get_bit_depth(png_ptr, info_ptr);
+	color_type = png_get_color_type(png_ptr, info_ptr);
+	if(color_type != PNG_COLOR_TYPE_PALETTE || bitdepth != 8)
 	{
 		png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
-		fprintf(stderr, "%s: only paletted images are supported.\n",
+		fprintf(stderr, "%s: only 8-bit paletted images are supported.\n",
 			       	filename);
 		return;
 	}
@@ -208,17 +209,37 @@ void read_palette_png(int n, char* filename)
 	
 	// read palette
 	png_color* p;
-	png_get_PLTE(png_ptr, info_ptr, &p, &palette[n].n_colors);
+	png_get_PLTE(png_ptr, info_ptr, &p, &image[n].n_colors);
 
 	// copy colors
-	palette[n].palette = malloc(sizeof(png_color) * 256);
-	memcpy(palette[n].palette, p, sizeof(png_color) * 256);
+	image[n].palette = malloc(sizeof(png_color) * 256);
+	memcpy(image[n].palette, p, sizeof(png_color) * 256);
+
+	// get transparent color
+	image[n].transparent = -1;
+	if(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS))
+	{
+		png_bytep trans_alpha;
+		int num_trans;
+		png_get_tRNS(png_ptr, info_ptr, &trans_alpha, &num_trans, NULL);
+		if(num_trans > 0)
+			image[n].transparent = trans_alpha[0];
+	}
+
+	// read image data
+	image[n].row_pointers = malloc(sizeof(png_bytep) * image[n].h);
+	int y;
+	for(y=0; y<image[n].h; y++)
+		image[n].row_pointers[y] = 
+			malloc(png_get_rowbytes(png_ptr, info_ptr));
+	png_read_image(png_ptr, image[n].row_pointers);
 
 	// close
 	if(png_ptr && info_ptr)
 		png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+	fclose(f);
 
-	palette[n].valid = 1;
+	image[n].valid = 1;
 }
 
 
@@ -242,7 +263,7 @@ void read_palette(int n, char* filename)
 	{
 invalid_file:
 		fprintf(stderr, "%s: invalid image or palette.\n", filename);
-		palette[n].valid = 0;
+		image[n].valid = 0;
 	}
 }
 
@@ -259,20 +280,18 @@ void merge_palettes()
 	int i, j, k; // loop counters
 
 	for(i=0; i<n_input_files; i++)
-		if(palette[i].valid) for(j=0; j<palette[i].n_colors; j++)
+		if(image[i].valid) for(j=0; j<image[i].n_colors; j++)
 		{
 			int found = 0;
 			for(k=0; k<final.n_colors; k++)
 				if(colorcmp(&final.palette[k], 
-							&palette[i].palette[j]))
+						&image[i].palette[j]))
 					found = 1;
 			if(!found) // TODO - check unused colors
 			{
 				if(final.n_colors <= 255)
 				{
-					struct Palette* p = &palette[i];
-					png_color* pc = p->palette;
-					png_color c = pc[j];
+					png_color c = image[i].palette[j];
 					final.palette[final.n_colors] = c;
 				}
 				final.n_colors++;
@@ -351,6 +370,84 @@ out_error:
 }
 
 
+static void replace_colors(int n)
+{
+	// TODO - transparent color
+
+	// find correspondant colors
+	int x, y, correspondence[256] = { [0 ... 255] -1 } ;
+	for(y=0; y<image[n].h; y++)
+		for(x=0; x<image[n].w; x++)
+		{
+			png_byte c = image[n].row_pointers[y][x];
+			if(correspondence[c] == -1)
+			{
+				int i;
+				for(i=0; i<image[n].n_colors; i++)
+					if(colorcmp(&final.palette[i],
+							&image[n].palette[c]))
+					{
+						correspondence[c] = i;
+						break;
+					}
+				// sanity
+				if(correspondence[c] == -1)
+					abort();
+			}
+		}
+
+	// replace colors
+	for(y=0; y<image[n].h; y++)
+		for(x=0; x<image[n].w; x++)
+		{
+			png_byte c = image[n].row_pointers[y][x];
+			image[n].row_pointers[y][x] = correspondence[c];
+		}
+}
+
+
+static void save_image(int n)
+{
+	FILE *f = fopen(input_files[n], "wb");
+	if(!f)
+	{
+		perror(input_files[n]);
+		return;
+	}
+
+	// initialize libpbng
+	png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, 
+			NULL, NULL, NULL);
+	png_infop info_ptr = png_create_info_struct(png_ptr);
+	if(!png_ptr || !info_ptr)
+		abort();
+	png_init_io(png_ptr, f);
+
+	// handle errors
+	if(setjmp(png_ptr->jmpbuf))
+	{
+		png_destroy_write_struct(&png_ptr, &info_ptr);
+		fprintf(stderr, "%s: something went wrong while writing PNG "
+				"file.\n", input_files[n]);
+		return;
+	}
+
+	// write header
+	png_set_IHDR(png_ptr, info_ptr, image[n].w, image[n].h, 8, 
+			PNG_COLOR_TYPE_PALETTE, PNG_INTERLACE_NONE, 
+			PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+
+	// write palette
+	png_set_PLTE(png_ptr, info_ptr, final.palette, final.n_colors);
+	
+	// write data
+	png_write_info(png_ptr, info_ptr);
+	png_write_image(png_ptr, image[n].row_pointers);
+	png_write_end(png_ptr, NULL);
+	fclose(f);
+}
+
+
 void rewrite_image(int n)
 {
 	// tries to backup the file and, if it fails, doesn't continue
@@ -358,7 +455,9 @@ void rewrite_image(int n)
 		if(!backup(n))
 			exit(EXIT_FAILURE);
 
+	replace_colors(n);
 
+	save_image(n);
 }
 
 /*
@@ -375,7 +474,7 @@ void output_new_palette()
 		printf("%3d %3d %3d %s\n", final.palette[i].red, 
 				           final.palette[i].green,
 				           final.palette[i].blue,
-					   "Untitled"); // TODO - use X color name?
+					   "Untitled");
 }
 
 /*
@@ -389,7 +488,7 @@ int main(int argc, char* argv[])
 	get_options(argc, argv);
 
 	// read palettes
-	palette = calloc(sizeof(struct Palette), n_input_files);
+	image = calloc(sizeof(struct Image), n_input_files);
 	int i;
 	for(i=0; i<n_input_files; i++)
 		read_palette(i, input_files[i]);
@@ -399,7 +498,7 @@ int main(int argc, char* argv[])
 	
 	// rewrite images
 	for(i=0; i<n_input_files; i++)
-		if(palette[i].valid)
+		if(image[i].valid)
 			rewrite_image(i);
 	
 	// output new palette
