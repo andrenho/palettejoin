@@ -250,16 +250,14 @@ inline void read_until_next_eol(FILE* f)
 	do
 	{
 		c = fgetc(f);
-	} while(c != '\n' || c != EOF);
+	} while(c != '\n' && c != EOF);
 }
 
 void read_palette_gpl(int n, char* filename)
 {
-	// TODO
-
-	int i = 0;
 	char who_cares[2048];
 	image[n].valid = 0;
+	image[n].palette = malloc(sizeof(png_color) * 256);
 
 	FILE* f = fopen(filename, "r");
 	if(!f)
@@ -272,11 +270,18 @@ void read_palette_gpl(int n, char* filename)
 	read_until_next_eol(f);
 	read_until_next_eol(f);
 	read_until_next_eol(f);
-	while(c != EOF)
-		fscanf(f, "%d %d %d %s", (int*)&image[n].palette[i].red,
-				         (int*)&image[n].palette[i].green,
-				         (int*)&image[n].palette[i].blue,
-					 who_cares);
+	while(!feof(f))
+	{
+		int r, g, b;
+		fscanf(f, "%d %d %d %s\n", &r, &g, &b, who_cares);
+		image[n].palette[image[n].n_colors].red = r;
+		image[n].palette[image[n].n_colors].green = g;
+		image[n].palette[image[n].n_colors].blue = b;
+		image[n].n_colors++;
+	}
+
+	fclose(f);
+	image[n].valid = 1;
 }
 
 
@@ -305,36 +310,60 @@ static inline int colorcmp(png_color* a, png_color* b)
 	return (a->red == b->red && a->green == b->green && a->blue == b->blue);
 }
 
+
+static void add_color_to_final_palette(int i, int j)
+{
+	png_color c = image[i].palette[j];
+
+	if(eliminate_unused)
+	{
+		int x, y;
+		for(y=0; y<image[i].h; y++)
+			for(x=0; x<image[i].w; x++)
+				if(image[i].row_pointers[y][x] == j)
+					goto color_found;
+		return; // not found
+	}
+
+	int k, found = 0;
+color_found:
+	if(j != image[i].transparent)
+	{
+		for(k=1; k<final.n_colors; k++)
+			if(colorcmp(&final.palette[k], &image[i].palette[j]))
+				found = 1;
+		if(!found)
+		{
+			if(final.n_colors <= 255)
+				final.palette[final.n_colors] = c;
+			final.n_colors++;
+		}
+	}
+}
+
+
 void merge_palettes()
 {
-	int i, j, k; // loop counters
+	int i, j; // loop counters
 
 	final.n_colors = 1; // 0 is used for transparency
 	final.palette[0] = (png_color) { 255, 0, 255 };
 
 	for(i=0; i<n_input_files; i++)
-		if(image[i].valid) for(j=0; j<image[i].n_colors; j++)
-		{
-			int found = 0;
-			for(k=1; k<final.n_colors; k++)
-				if(colorcmp(&final.palette[k], 
-						&image[i].palette[j]))
-					found = 1;
-			if(!found) // TODO - check unused colors
-			{
-				if(final.n_colors <= 255)
-				{
-					png_color c = image[i].palette[j];
-					final.palette[final.n_colors] = c;
-				}
-				final.n_colors++;
-			}
-		}
+		if(image[i].valid) 
+			for(j=0; j<image[i].n_colors; j++)
+				add_color_to_final_palette(i, j);
+
 	if(final.n_colors > 255)
 	{
 		fprintf(stderr, "The joined palette of these images resulted "
 				"in %d colors, and a new palette can have "
 				"256 colors at most.\n", final.n_colors);
+		if(!eliminate_unused)
+			fprintf(stderr, "Try running with the "
+					"--eliminate-unused switch to try to "
+					"reduce the number of colors.\n");
+		exit(EXIT_FAILURE);
 	}
 }
 
@@ -416,13 +445,14 @@ static void replace_colors(int n)
 			else if(correspondence[c] == -1)
 			{
 				int i;
-				for(i=0; i<image[n].n_colors; i++)
-					if(colorcmp(&final.palette[i],
-							&image[n].palette[c]))
+				for(i=0; i<final.n_colors; i++)
+				{
+					if(colorcmp(&final.palette[i], &image[n].palette[c]))
 					{
 						correspondence[c] = i;
 						break;
 					}
+				}
 				// sanity
 				if(correspondence[c] == -1)
 					abort();
@@ -487,6 +517,10 @@ static void save_image(int n)
 
 void rewrite_image(int n)
 {
+	// if image width is 0, then it's just a palette
+	if(image[n].w == 0)
+		return;
+
 	// tries to backup the file and, if it fails, doesn't continue
 	if(backup_old_files)
 		if(!backup(n))
