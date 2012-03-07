@@ -19,5 +19,11 @@ palettejoin.o: palettejoin.c
 debug:
 	$(MAKE) $(MAKEFILE) CFLAGS="-O0 -Wall -Wextra -g `pkg-config --cflags libpng12`" DEBUG="yes"
 
+dist:
+	cd .. && tar -jcf palettejoin/palettejoin-1.0.0.tar.bz palettejoin/palettejoin.c palettejoin/Makefile palettejoin/README palettejoin/AUTHORS palettejoin/Changelog palettejoin/COPYING && cd palettejoin
+
+install: palettejoin
+	cp palettejoin /usr/local/bin/
+
 clean:
 	rm -rf *.o palettejoin

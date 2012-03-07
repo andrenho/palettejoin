@@ -1,0 +1,17 @@
+`palettejoin` Joins the palettes of 8-bit multiple PNG images, generating one 
+single palette and adapting the images to the new palette.
+
+The library libpng is required and can be downloaded in
+<http://www.libpng.org/pub/png/libpng.html>.
+
+The software can be compiled in the classic way:
+
+  $ make
+  # make install
+
+Please use `palettejoin --help` to see the options provided.
+
+`palettejoin` is free software and is licensed under the GPLv3 
+<http://gnu.org/licenses/gpl.html>. See COPYING file for details.
+
+The software home page is <http://palettejoin.googlecode.com/>.
